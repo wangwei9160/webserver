@@ -1,6 +1,11 @@
 #ifndef HTTP_CONNECTION_H
 #define HTTP_CONNECTION_H
 
+/*
+get : 向服务器获取数据
+post ： 向服务器发数据
+*/
+
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
@@ -34,9 +39,10 @@ const char *doc_root = "/";
 
 class http_connection{
 public:
-    static const int FILENAME_LEN = 200;
-    static const int READ_BUFFER_SIZE = 2048;
-    static const int WRITE_BUFFER_SIZE = 1024;
+    static const int FILENAME_LEN = 200;            // 设置读取文件的名称 real_file 的大小
+    static const int READ_BUFFER_SIZE = 2048;       // 设置读缓冲区 read_buf 的大小
+    static const int WRITE_BUFFER_SIZE = 1024;      // 设置写缓冲区 write_buf 的大小
+    // 报文的请求方法，本项目中只会使用到GET和POST
     enum METHOD{
         GET = 0,
         POST ,
@@ -48,11 +54,35 @@ public:
         CONNECT ,
         PATH
     };
+    /*
+    主状态机的状态
+    1、CHECK_STATE_REQUESLINE    解析请求行
+    2、CHECK_STATE_HEADER        解析请求头
+    3、CHECK_STATE_CONTENT       解析消息体，仅用于解析post请求
+    */
     enum CHECK_STATE{
         CHECK_STATE_REQUESLINE = 0,
         CHECK_STATE_HEADER ,
         CHECK_STATE_CONTENT,
     };
+    /*
+    从状态机的状态
+    1、LINE_OK      完整读取一行
+    2、LINE_BAD     报文语法有误
+    3、LINE_OPEN    读取的行不完整
+    */
+    enum LINE_STATUS{
+        LINE_OK = 0,
+        LINE_BAD,
+        LINE_OPEN
+    };
+    /*
+    报文解析的结构
+    1、NO_REQUEST       请求不完整，需要继续读取请求报文数据
+    2、GET_REQUEST      获得了完整的HTTP请求
+    3、BAD_REQUESET     HTTP请求报文有语法错误
+    4、INTERNAL_ERROR   服务器内部错误，该结果在主状态机逻辑switch的default下，一般不会触发
+    */
     enum HTTP_CODE{
         NO_REQUEST,
         GET_REQUEST,
@@ -63,36 +93,38 @@ public:
         INTERNAL_ERROR,
         CLOSED_CONNECTION
     };
-    enum LINE_STATUS{
-        LINE_OK = 0,
-        LINE_BAD,
-        LINE_OPEN
-    };
+    
 private:
     int sockfd;
     sockaddr_in address;
-    char read_buf[READ_BUFFER_SIZE];
-    int read_idx;
-    int checked_idx;
-    int start_line;
-    char write_buf[Write_BUFFER_SIZE];
-    int write_idx;
-    CHECK_STATE check_state;
-    METHOD method;
-    char real_file[FILENAME_LEN];
+
+    char read_buf[READ_BUFFER_SIZE];                    //存储读取的请求报文数据
+    int read_idx;                                       //缓冲区read_buf中数据的最后一个字节的下一个位置
+    int checked_idx;                                    //read_buf读取的位置
+    int start_line;                                     //read_buf已经解析的字符的个数
+
+    char write_buf[Write_BUFFER_SIZE];                  //存储发出的响应报文数据
+    int write_idx;                                      //write_buf的长度
+
+    CHECK_STATE check_state;                            //主状态机的状态
+    METHOD method;                                      //请求方法
+
+    //解析请求报文中对应的6个变量
+    char real_file[FILENAME_LEN];                       //存储读取文件的名字
     char *url;
     char *version;
     char *host;
     int content_length;
     bool linger;
-    char *file_address;
-    struct stat file_stat;
-    struct iovec iv[2];
-    int iv_count;
-    int cgi;//是否启用post
-    char *str; //存储请求头信息
-    int bytes_to_send;
-    int bytes_have_send;
+
+    char *file_address;                                 //读取服务器上的文件地址
+    struct stat file_stat;                          
+    struct iovec iv[2];                                 //io向量机制iovec
+    int iv_count;                                   
+    int cgi;                                            //是否启用的post
+    char *str;                                          //存储请求头信息
+    int bytes_to_send;                                  //剩余发送的字节数
+    int bytes_have_send;                                //已经发送的字节数
 
 public:
     static int epoll_fd;
@@ -104,25 +136,30 @@ public:
     ~http_connection() {};
 
 public:
-    void init(int sockfd , const sockaddr_in &addr);
+    void init(int sockfd , const sockaddr_in &addr);        //对私有变量进行初始化
     void close_conn(bool real_close = true);
     void process();
-    bool read_once();
+    bool read_once();                                       //读取浏览器端发送来的请求报文，直到无数据可读或对方关闭连接，读取到read_buf中，同时更新read_idx
     bool write();
     sockaddr_in *get_address() {return &address;}
     void initmysql_result(mysql_connection_pool *connPool);
 
 private:
-    void init();
-    HTTP_CODE process_read();
-    bool process_write(HTTP_CODE ret);
-    HTTP_CODE parse_request_line(char *text);
-    HTTP_CODE parse_headers(char *text);
-    HTTP_CODE parse_content(char *text);
-    HTTP_CODE do_request();
-    char *get_line() {return read_buf + start_line;};
-    LINE_STATUS parse_line();
+    void init();                                            
+    HTTP_CODE process_read();                               //从read_buf读取，并处理请求报文
+    bool process_write(HTTP_CODE ret);                      //向write_buf写入响应报文数据
+    HTTP_CODE parse_request_line(char *text);               //主状态机解析报文中的请求行数据
+    HTTP_CODE parse_headers(char *text);                    //主状态机解析报文中的请求头数据
+    HTTP_CODE parse_content(char *text);                    //主状态机解析报文中的请求内容
+    HTTP_CODE do_request();                                 //生成响应报文
+
+
+    char *get_line() {return read_buf + start_line;};       //用于将指针向后偏移，指向未处理的字符
+    LINE_STATUS parse_line();                               //从状态机读取一行，分析是请求报文的那一部分
+
     void unmap();
+
+    // 根据响应报文的格式，生成对应8个部分，均由do_request调用
     bool add_response(const char *formate, ...);
     bool add_content(const char *content);
     bool add_status_line(int status,const char *title);
@@ -160,6 +197,41 @@ void http_connection::initmysql_result(mysql_connection_pool *connPool){
     }
 }
 
+/*
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+epoll相关代码包括非阻塞模式、内核时间表注册时间、删除事件、重置EPOLLONSHOT时间四种
+
+int epoll_create(int size)
+创建一个指示epoll内核时间表的文件描述符，该描述符将用作其他epoll系统调用的第一个参数，size不起作用
+
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+该函数用于操控内核事件表监控的文件描述符上的事件：注册、修改、删除
+epfd：为epoll_create的句柄
+op：表示动作，用3个宏来表示
+    1、EPOLL_CTL_ADD(注册新的fd到epfd)
+    2、EPOLL_CTL_MOD(修改已经注册的fd的监听事件)
+    3、EPOLL_CTL_DEL(从epfd删除一个fd)
+event：告诉内核需要监听的事件
+struct epoll_event{
+    _unit32_t events; //epoll events
+    epoll_data_t data;  //User data variable 
+}
+
+events描述事件类型，其中epoll事件类型有以下几种
+    1、EPOLLIN：表示对应的文件描述符可以读。（包括对端SOCKET正常关闭）
+    2、EPOLLOUT：表示对应的文件描述符可以写
+    3、EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该表示有带外数据到来）
+    4、EPOLLERR：表示对应的文件描述符发生错误
+    5、EPOLLHUP：表示对应的文件描述符被挂断；
+    6、EPOLLET：将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)而言的
+    7、EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
+
+
+*/
+
+
 //对文件描述符设置为非阻塞
 int setnonblocking(int fd){
     int old_option = fctntl(fd , F_GETFL);
@@ -194,7 +266,7 @@ void addfd(int epollfd , int fd , bool one_shot){
     if(one_shot){
         event.events |= EPOLLONESHOT;
     }
-    epoll_ctl(epollfa , EPOLL_CTL_ADD , fd , &event);
+    epoll_ctl(epollfd , EPOLL_CTL_ADD , fd , &event);
     setnonblocking(fd);
 }
 
@@ -218,6 +290,11 @@ void modfd(int epollfd , int fd , int ev){
 
     epoll_ctl(epollfd , EPOLL_CTL_MOD , fd , &event);
 }
+
+/*
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+*/
 
 int http_connection::user_count = 0;
 int http_connection::epollfd = -1;
@@ -298,13 +375,15 @@ http_connection::LINE_STATS http_connection::parse_line(){
 //循环读取客户数据，知道无数据可读或对方关闭连接
 //非阻塞ET工作模式下，需要一次性将数据读完
 bool http_connection::read_once(){
+
     if(read_idx >= READ_BUFFER_SIZE){
         return false;
     }
     
     int bytes_read = 0;
+
 #ifdef connfdLT
-    bytes_read = recv(sockfd , read_buf + read_idx , READ_BUFFER_SIZE - read_idx , 0);
+    bytes_read = recv(sockfd,read_buf+read_idx,READ_BUFFER_SIZE-read_idx,0);
     read_idx += bytes_read;
 
     if(bytes_read <= 0){
@@ -315,17 +394,22 @@ bool http_connection::read_once(){
 
 #ifdef connfdET
     while(true){
+        // 从套接字接受数据，存储在read_buf缓冲区
         bytes_read = recv(sockfd,read_buf+read_idx,READ_BUFFER_SIZE-read_idx,0);
         if(bytes_read == -1){
-            if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+            //非阻塞ET模式下，需要一次性将数据读完
+            if(errno == EAGAIN || errno == EWOULDBLOCK) 
+                break;
             return false;
         }else if(bytes_read == 0){
             return false;
         }
+        //修改read_idx的读取字节数
         read_idx += bytes_read ; 
     }
     return true;
 #endif
+
 }
 
 //解析http请求行，获取请求方法，目标url以及http版本号
@@ -390,8 +474,10 @@ http_connection::HTTP_CODE http_connection::parse_headers(char *text){
 
 //判断http请求是否被完整读入
 http_connection::HTTP_CODE http_connection::parse_content(char *text){
-    if(read_idx >= (content_length + checked_idx)){
+    if( read_idx >= (content_length + checked_idx) ){
         text[content_length ] = '\0';
+
+        // post 请求中最后是输入的用户名和密码
         str = text;
         return GET_REQUEST;
     }
@@ -440,8 +526,188 @@ http_connection::HTTP_CODE http_connection::process_read(){
 }
 
 http_connection::HTTP_CODE http_connection::do_request(){
+
     strcpy(real_file , doc_root);
+    int len = strlen(doc_root);
+    const char *p = strtchr(url , '/');
+
+    //处理cgi
+    if(cgi == 1 && (*(p+1) == '2' || *(p+1) == '3')){
+        char flag = url[1];
+        char *url_real = (char *)malloc(sizeof(char)*200);
+        strcpy(url_real , "/");
+        strcat(real_file + len , url_real , FILENAME_LEN - len - 1);
+
+        //用户名密码提取出来
+        char name[100] , password[100];
+        int i;
+        for(i = 5 ; str[i] != '&' ; ++i){
+            name[i-5] = str[i];
+        }
+        name[i-5] = '\0';
+
+        int j = 0 ;
+        for(i = i+10 ; str[i] != '\0' ; ++i , ++j){
+            password[j] = str[i];
+        }
+        password[j] = '\0';
+
+        if( *(p+1) == '3' ){
+            // 如果是注册的，先检测数据库中是否有重名
+            // 没有重名的则进行增加数据
+            char *sql_insert = (char *)malloc(sizeof(char) * 200);
+            strcpy(sql_insert , "insert into user(username,passwd) values(");
+            strcat(sql_insert , "'");
+            strcat(sql_insert,name);
+            strcat(sql_insert , "','");
+            strcat(sql_insert,password);
+            strcat(sql_insert , "')");
+
+            if(user.find(name) == user.end()){
+                lock.lock();
+                int res = mysql_query(mysql , sql_insert);
+                users.insert(pair<string ,string>(name,password));
+                lock.unlock();
+
+                if(!res) strcpy(url , "/login.html");
+                else strcpy(url , "/registerError.html");
+            }else {
+                strcpy(url , "/registerError.html");
+            }
+        }else if( *(p+1) == '2' ){
+            // 如果是登录，直接判断
+            // 若浏览器端输入的用户名和密码在表中可以找到，返回1，否则返回0
+            if(user.find(name) != user.end() && users[name] == password ){
+                strcpy(url , "/welcome.html");
+            }else {
+                strcpy(url , "/loginError.html");
+            }
+        }
+    }
+
+    if( *(p+1) == '0' ){
+        char *url_real = (char *)malloc(sizeof(char) * 200);
+
+        strcpy(url_real , "/register.html");
+        strcpy(real_file+len,url_real,strlen(url_real));
+        
+        free(url_real);
+    }else if( *(p+1) == '1' ){
+        char *url_real = (char *)malloc(sizeof(char) * 200);
+
+        strcpy(url_real , "/login.html");
+        strcpy(real_file+len,url_real,strlen(url_real));
+        
+        free(url_real);
+    }else if( *(p+1)  == '5' ){
+        char *url_real = (char *)malloc(sizeof(char) * 200);
+
+        strcpy(url_real , "/picture.html");
+        strcpy(real_file+len,url_real,strlen(url_real));
+        
+        free(url_real);
+    }else if( *(p+1)  == '6' ){
+        char *url_real = (char *)malloc(sizeof(char) * 200);
+
+        strcpy(url_real , "/video.html");
+        strcpy(real_file+len,url_real,strlen(url_real));
+        
+        free(url_real);
+    }else if( *(p+1)  == '6' ){
+        char *url_real = (char *)malloc(sizeof(char) * 200);
+
+        strcpy(url_real , "/fans.html");
+        strcpy(real_file+len,url_real,strlen(url_real));
+        
+        free(url_real);
+    }else {
+        strncmp(real_file+len , url , FILENAME_LEN-len-1);
+    }
+
+    if(stat(real_file , file_stat) < 0){
+        return NO_REQUEST;
+    }
+
+    if( !(file_stat.st_mode & S_IROTH) ) {
+        return FORBIDDEN_REQUESET;
+    }
+
+    if( S_ISDIR(file_stat.st_mode) )
+        return BAD_REQUESET;
+
+    int fd = open("real_file , O_RDONLY");
+    file_address = (char *)mmap(0,file_stat.st_size , PROT_REAED, MAP_PRIVATE, fd,0);
+    close(fd);
+    return FILE_REQUEST;
 }
 
+void http_connection::unmap(){
+    if(file_address){
+        munmap(file_address , file_stat.st_size);
+        file_address = 0;
+    }
+}
+
+bool http_connection::write(){
+    int temp = 0;
+
+    if(bytes_to_send == 0){
+        modfd(epollfd , sockfd , EPOLLIN);
+        init();
+        return true;
+    }
+
+    while(1){
+        temp = writev(sockfd , iv , iv_count);
+        
+        if(temp < 0){
+            if( errno == EAGAIN ){
+                modfd(epollfd , sockfd , EPOLLOUT);
+                return true;
+            }
+            unmap();
+            return false;
+        }
+
+        bytes_have_send += temp;
+        bytes_to_send -= temp;
+
+        if( bytes_have_send >= iv[0].iov_len){
+            iv[0].iov_len = 0;
+            iv[1].iov_base = file_address + (bytes_have_send - write_idx);
+            iv[1].iov_len = bytes_to_send;
+        }else {
+            iv[0].iov_base = write_buf + bytes_have_send;
+            iv[0].iov_len = iv[0].iov_len - bytes_have_send;
+        }
+
+        if(bytes_to_send <= 0){
+            unmap();
+            modfd(epollfd , sockfd , EPOLLIN);
+
+            if(linger){
+                init();
+                return true;
+            }else {
+                return false;
+            }
+        }
+    }
+}
+
+
+void http_connection::process(){
+    HTTP_CODE read_ret = process_read();
+    if(read_ret == NO_REQUEST){
+        modfd(epoll_fd , sockfd , EPOLLIN);
+        return ;
+    }
+    
+    bool write_ret = process_write(read_ret);
+    if(!write_ret){
+        close_conn();
+    }
+    modfd(epollfd , sockfd , EPOLLOUT);
+}
 
 #endif HTTP_CONNECTION_H
