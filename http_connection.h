@@ -484,6 +484,7 @@ http_connection::HTTP_CODE http_connection::parse_content(char *text){
     return NO_REQUEST;
 }
 
+// 读报文
 http_connection::HTTP_CODE http_connection::process_read(){
     LINE_STATUS line_status = LINE_OK;
     HTTP_CODE ret = NO_REQUEST;
@@ -694,6 +695,106 @@ bool http_connection::write(){
         }
     }
 }
+/*
+    根据响应报文的格式，生成对应8个部分，均由do_request调用
+    bool add_response(const char *formate, ...);
+    bool add_content(const char *content);
+    bool add_status_line(int status,const char *title);
+    bool add_headers(int content_length);
+    bool add_content_type();
+    bool add_content_length(int content_length);
+    bool add_linger();
+    bool add_blank_line();
+*/
+bool http_connection::add_response(const char *format, ...){
+    if(write_idx >= WRITE_BUFFER_SIZE){
+        return false;
+    }
+    va_list arg_list ;
+    va_start(arg_list,format);
+    int len = vsprintf(write_buf + write_idx, WRITE_BUFFER_SIZE-1,write_idx,format,arg_list);
+    if(len >= (WRITE_BUFFER_SIZE-1-write_idx)){
+        va_end(arg_list);
+        return false;
+    }
+    write_idx += len;
+    va_end(arg_list);
+
+    return true;
+}
+
+bool http_connection::add_status_line(int status , const char *title){
+    return add_response("%s %d %s\r\n" , "HTTP/1.1" , status , title);
+}
+bool http_connection::add_headers(int content_len){
+    return add_content_length(content_len) && add_linger() && add_blank_line();
+}
+bool http_connection::add_content_length(int content_len){
+    return add_response("Content-Length:%d\r\n",content_len);
+}
+bool http_connection::add_content_type(){
+    return add_response("Content-Type:%s\r\n","text/html");
+}
+bool http_connection::add_linger(){
+    return add_response("Connection:%s\r\n",(linger == true) ? "keep-alive" :"close");
+}
+bool http_connection::add_blank_line(){
+    return add_response("%s","\r\n");
+}
+bool http_connection::add_content(const char *content){
+    return add_response("%s",content);
+}
+bool http_connection::process_write(HTTP_CODE ret){
+    switch (ret)
+    {
+    case INTERNAL_ERROR:{
+        add_status_line(500,error_500_title);
+        add_headers(strlen(error_500_form));
+        if(!add_content(error_500_form))
+            return false;
+        break;
+    }
+    case BAD_REQUEST:{
+        add_status_line(404,error_404_title);
+        add_headers(strlen(error_404_form));
+        if(!add_content(error_404_form))
+            return false;
+        break;
+    }
+    case FORBIDDEN_REQUEST:{
+        add_status_line(403,error_403_title);
+        add_headers(strlen(error_403_form));
+        if(!add_content(error_403_form))
+            return false;
+        break;
+    }
+    case FILE_REQUEST:{
+        add_status_line(200,ok_200_title);
+        if(file_stat.st_size != 0){
+            add_headers(file_stat.st_size);
+            iv[0].iov_base = write_buf;
+            iv[0].iov_len = write_idx;
+            iv[1].iov_base = file_address;
+            iv[1].iov_len = file_stat.st_size;
+            iv_count = 2;
+            bytes_to_send = write_idx + file_stat.st_size;
+            return true;
+        }else {
+            const char *ok_string = "<html><body></body><html>";
+            add_headers(strlen(ok_string));
+            if(!add_content(ok_string)) 
+                return false;
+        }
+    }
+    default:
+        return false;
+    }
+    iv[0].iov_base = write_buf;
+    iv[0].iov_len = write_idx;
+    iv_count = 1;
+    bytes_to_send = write_idx;
+    return true;
+}
 
 
 void http_connection::process(){
@@ -702,7 +803,7 @@ void http_connection::process(){
         modfd(epoll_fd , sockfd , EPOLLIN);
         return ;
     }
-    
+
     bool write_ret = process_write(read_ret);
     if(!write_ret){
         close_conn();
